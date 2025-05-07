@@ -1,0 +1,10 @@
+Flask
+Flask-SQLAlchemy
+transformers
+torch
+librosa
+numpy
+scipy
+scikit-learn
+python-Levenshtein
+gunicorn
