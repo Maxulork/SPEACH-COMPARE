@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Slovak Speech Similarity Analyzer</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"/>
+</head>
+<body>
+  <header>
+    <h1>Slovak Speech Similarity Analyzer</h1>
+  </header>
+  <main class="container">
+    <nav class="tab-nav">
+      <button id="analyze-tab" class="tab active">Analyze</button>
+      <button id="lessons-tab"  class="tab">Lessons</button>
+    </nav>
+
+    <!-- Analyze Section -->
+    <section id="analyze-section" class="card">
+      <form id="uploadForm" enctype="multipart/form-data" class="form-grid">
+        <div class="input-group">
+          <h3>Audio 1</h3>
+          <div class="audio-options">
+            <label for="audio1-upload" class="upload-label">Upload Manually</label>
+            <input type="file" id="audio1-upload" name="audio1" accept=".wav,.mp3"/>
+            <button type="button" id="audio1-record-btn" class="secondary-btn">Record</button>
+          </div>
+          <div id="waveform1" class="waveform"></div>
+        </div>
+        <div class="input-group">
+          <h3>Audio 2</h3>
+          <div class="audio-options">
+            <label for="audio2-upload" class="upload-label">Upload Manually</label>
+            <input type="file" id="audio2-upload" name="audio2" accept=".wav,.mp3"/>
+            <button type="button" id="audio2-record-btn" class="secondary-btn">Record</button>
+          </div>
+          <div id="waveform2" class="waveform"></div>
+        </div>
+        <div class="input-group action-group">
+          <div class="select-group">
+            <label for="visualize">Visualize?</label>
+            <select id="visualize" name="visualize">
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+          <button type="submit" id="analyze-btn" class="primary-btn" disabled>Analyze</button>
+        </div>
+      </form>
+      <div id="loading" class="hidden loading-box">
+        <p>Analyzing...</p>
+        <div id="logs" class="log-box"></div>
+      </div>
+      <div id="result" class="hidden result-card">
+        <h2>Results</h2>
+        <p id="similarity" class="highlight"></p>
+        <div id="transcriptions" class="info-box">
+          <h3>Transcriptions</h3>
+          <p id="transcription1"></p>
+          <p id="transcription2"></p>
+        </div>
+        <div id="metrics" class="hidden info-box">
+          <h3>Detailed Metrics</h3>
+          <ul id="metrics-list"></ul>
+        </div>
+        <img id="comparisonImage" src="" alt="Comparison Visualization" class="hidden comparison-img"/>
+        <button id="export-btn" class="secondary-btn">Export Results</button>
+      </div>
+    </section>
+
+    <!-- Lessons Section -->
+    <section id="lessons-section" class="card hidden">
+      <div class="lesson-header">
+        <button id="add-lesson-btn" class="primary-btn">Add Lesson</button>
+        <input type="text" id="lesson-search" class="search-bar" placeholder="Search lessons..."/>
+      </div>
+      <div id="lesson-list" class="lesson-list">
+        {% if lessons %}
+          {% for lesson in lessons %}
+            <div class="lesson-item" data-id="{{ lesson.id }}">
+              <span class="lesson-name">{{ lesson.name }}</span>
+              <div class="lesson-progress">
+                <div class="progress-bar" style="width: {{ lesson.attempts|length>0 and (lesson.attempts[-1].similarity)|float ~ '%' or '0%' }}"></div>
+              </div>
+              <button onclick="showLesson({{ lesson.id }})" class="view-btn">View</button>
+              <button onclick="deleteLesson({{ lesson.id }})" class="delete-btn">✕</button>
+            </div>
+          {% endfor %}
+        {% else %}
+          <p class="empty-state">No lessons created yet.</p>
+        {% endif %}
+      </div>
+
+      <div id="lesson-view" class="lesson-view hidden">
+        <button onclick="backToList()" class="back-btn">← Back</button>
+        <h2 id="lesson-title"></h2>
+
+        <div id="lesson-create" class="form-grid hidden">
+          <div class="input-group">
+            <label for="lesson-name">Lesson Name</label>
+            <input type="text" id="lesson-name" name="lesson_name" placeholder="Enter lesson name" required/>
+          </div>
+          <div class="input-group">
+            <label for="reference-audio" class="upload-label">Upload Reference Audio</label>
+            <input type="file" id="reference-audio" name="reference_audio" accept=".wav,.mp3"/>
+            <button type="button" id="record-reference-btn" class="secondary-btn">Record Reference</button>
+            <div id="reference-waveform" class="waveform"></div>
+          </div>
+          <div class="input-group">
+            <label for="transcription">Transcription</label>
+            <textarea id="transcription" name="transcription" rows="3" placeholder="Enter transcription" required></textarea>
+          </div>
+          <button type="button" id="save-lesson-btn" class="primary-btn" disabled>Save Lesson</button>
+        </div>
+
+        <div id="lesson-progress" class="hidden">
+          <div class="form-grid">
+            <div class="input-group action-group">
+              <button type="button" id="record-attempt-btn" class="secondary-btn">Record Attempt</button>
+              <div id="attempt-waveform" class="waveform"></div>
+              <button type="button" id="compare-btn" class="primary-btn">Compare</button>
+            </div>
+          </div>
+          <div id="progress-loading" class="hidden loading-box">
+            <p>Analyzing...</p>
+            <div id="progress-logs" class="log-box"></div>
+          </div>
+          <div id="progress-history" class="result-card">
+            <h3>Progress History</h3>
+            <p id="latest-score" class="highlight"></p>
+            <ul id="score-list"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/wavesurfer.js"></script>
+  <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+  <script src="/static/js/script.js"></script>
+</body>
+</html>
