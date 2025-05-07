@@ -110,5 +110,10 @@ def update_lesson(lesson_id):
         app.logger.exception("update_lesson failed")
         return jsonify(success=False, error=str(e)), 500
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    import os
+    # Grab the PORT that Render assigns, default to 5000 locally
+    port = int(os.environ.get("PORT", 5000))
+    # Listen on 0.0.0.0 so it’s reachable externally
+    app.run(host="0.0.0.0", port=port)
+
