@@ -11,377 +11,205 @@ from sklearn.decomposition import PCA
 from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2ForCTC
 from scipy.stats import pearsonr
 from scipy.signal import correlate
-import torch.nn.functional as F
 from Levenshtein import distance as levenshtein_distance
 
 warnings.filterwarnings("ignore")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
-# Optimized DTW with Sakoe-Chiba band constraint
 def dtw_distance(x, y, distance_function=None):
     if distance_function is None:
         distance_function = lambda a, b: np.linalg.norm(a - b)
-
     n, m = len(x), len(y)
-    band_width = max(abs(n - m) + 15, int(0.15 * max(n, m)))
-
-    dtw_matrix = np.full((n + 1, m + 1), np.inf)
-    dtw_matrix[0, 0] = 0.0
-
-    for i in range(1, n + 1):
-        j_start = max(1, i - band_width)
-        j_end = min(m + 1, i + band_width)
-        for j in range(j_start, j_end):
-            cost = distance_function(x[i - 1], y[j - 1])
-            dtw_matrix[i, j] = cost + min(
-                dtw_matrix[i - 1, j],
-                dtw_matrix[i, j - 1],
-                dtw_matrix[i - 1, j - 1]
-            )
-
+    band = max(abs(n - m) + 15, int(0.15 * max(n, m)))
+    dtw = np.full((n+1, m+1), np.inf)
+    dtw[0,0] = 0.0
+    for i in range(1, n+1):
+        for j in range(max(1, i-band), min(m+1, i+band)):
+            cost = distance_function(x[i-1], y[j-1])
+            dtw[i,j] = cost + min(dtw[i-1,j], dtw[i,j-1], dtw[i-1,j-1])
     path = []
-    i, j = n, m
-    while i > 0 and j > 0:
-        path.append((i - 1, j - 1))
-        min_val = min(
-            dtw_matrix[i - 1, j],
-            dtw_matrix[i, j - 1],
-            dtw_matrix[i - 1, j - 1]
-        )
-        if min_val == dtw_matrix[i - 1, j - 1]:
-            i, j = i - 1, j - 1
-        elif min_val == dtw_matrix[i - 1, j]:
-            i = i - 1
+    i,j = n,m
+    while i>0 and j>0:
+        path.append((i-1, j-1))
+        vals = [dtw[i-1,j-1], dtw[i-1,j], dtw[i,j-1]]
+        move = vals.index(min(vals))
+        if move == 0:
+            i,j = i-1, j-1
+        elif move == 1:
+            i -=1
         else:
-            j = j - 1
-
+            j -=1
     path.reverse()
-
     class DTWResult:
         def __init__(self, distance, path):
             self.distance = distance
             self.index1 = [p[0] for p in path]
             self.index2 = [p[1] for p in path]
+    return DTWResult(dtw[n,m], path)
 
-    return DTWResult(dtw_matrix[n, m], path)
+class FeatureExtractor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1,32,3,padding=1), nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(32,64,3,padding=1), nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(64,128,3,padding=1), nn.ReLU(True), nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d((1,1)), nn.Flatten()
+        )
+    def forward(self, x):
+        return self.encoder(x)
 
 class SpeechSimilarityAnalyzer:
     def __init__(self):
-        print("Initializing Speech Similarity Analyzer...")
-
-        # Audio parameters
+        # Audio params
         self.sample_rate = 16000
         self.n_fft = 1024
         self.hop_length = 256
         self.n_mels = 128
         self.target_length = 250
-
-        # Create cache directory
+        # cache dir
         cache_dir = os.path.join(os.getcwd(), "model_cache")
         os.makedirs(cache_dir, exist_ok=True)
-
-        # Load models
+        # load models
         self._load_model(cache_dir)
         self._load_stt_model(cache_dir)
-        # Removed _load_siamese_text_model
-
-        # Initialize feature extractor
+        # feature extractor
         self.feature_extractor = FeatureExtractor().to(device)
 
-        # Segment parameters
-        self.segment_duration = 0.5
-        self.segment_samples = int(self.sample_rate * self.segment_duration)
-
     def _load_model(self, cache_dir):
-        print("Loading pre-trained model...")
-        models = [
-            "infinitejoy/wav2vec2-large-xls-r-300m-slovak",
-            "facebook/wav2vec2-base-960h"
-        ]
-        for model_name in models:
+        for name in ("infinitejoy/wav2vec2-large-xls-r-300m-slovak",
+                     "facebook/wav2vec2-base-960h"):
             try:
-                self.processor = Wav2Vec2Processor.from_pretrained(model_name, cache_dir=cache_dir)
-                self.model = Wav2Vec2Model.from_pretrained(model_name, cache_dir=cache_dir).to(device)
-                print(f"Successfully loaded {model_name}")
+                self.processor = Wav2Vec2Processor.from_pretrained(name, cache_dir=cache_dir)
+                self.model = Wav2Vec2Model.from_pretrained(name, cache_dir=cache_dir).to(device)
                 return
-            except Exception as e:
-                print(f"Local load failed: {e}")
-                try:
-                    self.processor = Wav2Vec2Processor.from_pretrained(
-                        model_name, cache_dir=cache_dir, local_files_only=False
-                    )
-                    self.model = Wav2Vec2Model.from_pretrained(
-                        model_name, cache_dir=cache_dir, local_files_only=False
-                    ).to(device)
-                    print(f"Downloaded and loaded {model_name}")
-                    return
-                except Exception as e2:
-                    print(f"Download failed: {e2}")
-        raise RuntimeError("Could not load any model.")
+            except:
+                continue
+        raise RuntimeError("Could not load wav2vec2 model.")
 
     def _load_stt_model(self, cache_dir):
-        print("Loading STT model specifically for Slovak language...")
+        # Slovak-specific fallback chain
+        slovak = "infinitejoy/wav2vec2-large-xls-r-300m-slovak"
         try:
-            # Try to load Slovak-specific model first
-            slovak_models = [
-                "infinitejoy/wav2vec2-large-xls-r-300m-slovak"
-            ]
+            self.stt_processor = Wav2Vec2Processor.from_pretrained(slovak, cache_dir=cache_dir)
+            self.stt_model = Wav2Vec2ForCTC.from_pretrained(slovak, cache_dir=cache_dir).to(device)
+            return
+        except:
+            # multilingual fallback
+            multi = "facebook/wav2vec2-large-xlsr-53"
+            self.stt_processor = Wav2Vec2Processor.from_pretrained(multi, cache_dir=cache_dir)
+            self.stt_model = Wav2Vec2ForCTC.from_pretrained(multi, cache_dir=cache_dir).to(device)
 
-            for model_name in slovak_models:
-                try:
-                    self.stt_processor = Wav2Vec2Processor.from_pretrained(model_name, cache_dir=cache_dir)
-                    self.stt_model = Wav2Vec2ForCTC.from_pretrained(model_name, cache_dir=cache_dir).to(device)
-                    print(f"Successfully loaded Slovak STT model: {model_name}")
-                    return
-                except Exception as e:
-                    print(f"Failed loading local Slovak model {model_name}: {e}")
-                    try:
-                        self.stt_processor = Wav2Vec2Processor.from_pretrained(
-                            model_name, cache_dir=cache_dir, local_files_only=False
-                        )
-                        self.stt_model = Wav2Vec2ForCTC.from_pretrained(
-                            model_name, cache_dir=cache_dir, local_files_only=False
-                        ).to(device)
-                        print(f"Downloaded and loaded Slovak STT model: {model_name}")
-                        return
-                    except Exception as e2:
-                        print(f"Download failed for {model_name}: {e2}")
-
-            # Fallback to multilingual model if Slovak-specific models fail
-            print("Slovak-specific models failed, trying multilingual model...")
-            self.stt_processor = Wav2Vec2Processor.from_pretrained(
-                "facebook/wav2vec2-large-xlsr-53", cache_dir=cache_dir
-            )
-            self.stt_model = Wav2Vec2ForCTC.from_pretrained(
-                "facebook/wav2vec2-large-xlsr-53", cache_dir=cache_dir
-            ).to(device)
-            print("Successfully loaded fallback multilingual XLSR model")
-
-        except Exception as e:
-            print(f"All STT model load attempts failed: {e}")
-            # Last resort - fall back to English model
-            try:
-                print("Attempting to load English model as last resort...")
-                self.stt_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h",
-                                                                       cache_dir=cache_dir)
-                self.stt_model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h", cache_dir=cache_dir).to(
-                    device)
-                print("Successfully loaded English STT model as fallback")
-            except Exception as e2:
-                print(f"All fallbacks failed: {e2}")
-                raise RuntimeError("Could not load any STT model.")
-
-    def load_audio(self, file_path):
-        print(f"Loading audio: {file_path}")
-        try:
-            audio, sr = librosa.load(file_path, sr=self.sample_rate)
-            print(f"Audio duration: {len(audio) / self.sample_rate:.2f} seconds")
-            audio = self.preprocess_audio(audio)
-            return audio
-        except Exception as e:
-            print(f"Error loading audio: {e}")
-            return None
+    def load_audio(self, path):
+        audio, _ = librosa.load(path, sr=self.sample_rate)
+        return self.preprocess_audio(audio)
 
     def preprocess_audio(self, audio):
-        if len(audio) == 0 or np.isnan(audio).any():
-            raise ValueError("Invalid audio data")
-
         audio = librosa.effects.preemphasis(audio, coef=0.97)
-        max_amp = np.max(np.abs(audio))
-        if max_amp > 0:
-            audio = audio / max_amp * 0.95
-
+        amp = np.max(np.abs(audio))
+        if amp>0: audio = audio/amp*0.95
         intervals = librosa.effects.split(audio, top_db=30)
-        if len(intervals) < 2:
-            intervals = librosa.effects.split(audio, top_db=20)
-
-        audio_out = np.zeros_like(audio)
-        for interval in intervals:
-            audio_out[interval[0]:interval[1]] = audio[interval[0]:interval[1]]
-
-        if np.sum(np.abs(audio_out)) < 1e-6:
-            print("Warning: No speech detected, using original")
-            return audio
-
-        return audio_out
+        out = np.zeros_like(audio)
+        for i,j in intervals:
+            out[i:j] = audio[i:j]
+        return out if out.sum()!=0 else audio
 
     def create_spectrogram(self, audio):
-        print("Creating spectrogram...")
-        spectrogram = librosa.feature.melspectrogram(
-            y=audio,
-            sr=self.sample_rate,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            n_mels=self.n_mels,
-            fmin=80,
-            fmax=8000
-        )
-
-        spectrogram_db = librosa.power_to_db(spectrogram, ref=np.max)
-        spectrogram_normalized = (spectrogram_db - spectrogram_db.min()) / (
-                spectrogram_db.max() - spectrogram_db.min() + 1e-10)
-
-        if spectrogram_normalized.shape[1] != self.target_length:
-            resized_spec = np.zeros((self.n_mels, self.target_length))
-
-            time_scale = spectrogram_normalized.shape[1] / self.target_length
+        spec = librosa.feature.melspectrogram(y=audio, sr=self.sample_rate,
+                                              n_fft=self.n_fft, hop_length=self.hop_length,
+                                              n_mels=self.n_mels, fmin=80, fmax=8000)
+        db = librosa.power_to_db(spec, ref=np.max)
+        norm = (db - db.min())/(db.max()-db.min()+1e-10)
+        # resize to target_length
+        if norm.shape[1]!=self.target_length:
+            out = np.zeros((self.n_mels, self.target_length))
+            scale = norm.shape[1]/self.target_length
             for t in range(self.target_length):
-                src_pos = t * time_scale
-                src_idx = int(src_pos)
-
-                if src_idx >= spectrogram_normalized.shape[1] - 1:
-                    src_idx = spectrogram_normalized.shape[1] - 2
-
-                alpha = src_pos - src_idx
-                resized_spec[:, t] = (1 - alpha) * spectrogram_normalized[:, src_idx] + \
-                                     alpha * spectrogram_normalized[:, src_idx + 1]
-
-            spectrogram_normalized = resized_spec
-
-        return spectrogram_normalized
+                src = scale*t
+                i0 = int(src); a=src-i0
+                if i0>=norm.shape[1]-1: i0 = norm.shape[1]-2
+                out[:,t] = (1-a)*norm[:,i0] + a*norm[:,i0+1]
+            norm = out
+        return norm
 
     def extract_hubert_features(self, audio):
-        print("Extracting speech features...")
-        try:
-            audio = audio / (np.max(np.abs(audio)) + 1e-10)
-            input_values = self.processor(audio, sampling_rate=self.sample_rate, return_tensors="pt").input_values
-            input_values = input_values.to(device)
+        audio = audio/(np.max(np.abs(audio))+1e-10)
+        vals = self.processor(audio, sampling_rate=self.sample_rate,
+                              return_tensors="pt").input_values.to(device)
+        with torch.no_grad():
+            feats = self.model(vals).last_hidden_state.squeeze().cpu().numpy()
+        mu, sigma = feats.mean(0), feats.std(0)+1e-8
+        feats = (feats-mu)/sigma
+        L = feats.shape[0]
+        if L>self.target_length:
+            idx = np.linspace(0,L-1,self.target_length,dtype=int)
+            feats = feats[idx]
+        elif L<self.target_length:
+            pad = np.zeros((self.target_length, feats.shape[1]))
+            for i in range(feats.shape[1]):
+                pad[:,i] = np.interp(np.linspace(0,1,self.target_length),
+                                     np.linspace(0,1,L), feats[:,i])
+            feats = pad
+        return feats
 
-            with torch.no_grad():
-                outputs = self.model(input_values)
-                features = outputs.last_hidden_state.squeeze().cpu().numpy()
-
-            mean = np.mean(features, axis=0)
-            std = np.std(features, axis=0) + 1e-8
-            features = (features - mean) / std
-
-            if features.shape[0] > self.target_length:
-                indices = np.linspace(0, features.shape[0] - 1, self.target_length, dtype=int)
-                features = features[indices]
-            elif features.shape[0] < self.target_length:
-                resized_features = np.zeros((self.target_length, features.shape[1]))
-                for i in range(features.shape[1]):
-                    x_orig = np.linspace(0, 1, features.shape[0])
-                    x_new = np.linspace(0, 1, self.target_length)
-                    resized_features[:, i] = np.interp(x_new, x_orig, features[:, i])
-                features = resized_features
-
-            return features
-        except Exception as e:
-            print(f"Error extracting features: {e}")
-            return np.zeros((self.target_length, self.model.config.hidden_size))
-
-    def compute_context_dtw_similarity(self, features1, features2):
-        print("Computing context-aware DTW similarity...")
-        try:
-            if features1.shape[1] > 64:
-                pca = PCA(n_components=64)
-                combined = np.nan_to_num(np.vstack([features1, features2]))
-                pca.fit(combined)
-                features1 = pca.transform(np.nan_to_num(features1))
-                features2 = pca.transform(np.nan_to_num(features2))
-
-            def context_distance(x, y):
-                eps = 1e-8
-                x_norm = x / (np.linalg.norm(x) + eps)
-                y_norm = y / (np.linalg.norm(y) + eps)
-                cos_sim = np.dot(x_norm, y_norm)
-                eucl_dist = np.linalg.norm(x - y)
-                return 0.7 * eucl_dist + 0.3 * (1 - cos_sim)
-
-            alignment = dtw_distance(
-                features1,
-                features2,
-                distance_function=context_distance
-            )
-
-            path_length = len(alignment.index1)
-            if path_length == 0:
-                return 20.0
-
-            distance = alignment.distance / path_length
-            similarity = 100 / (1 + np.exp(0.5 * distance - 2.5))
-        except Exception as e:
-            print(f"DTW calculation error: {e}")
-            similarity = 20.0
-
-        return min(100.0, max(0.0, similarity))
+    def compute_context_dtw_similarity(self, f1, f2):
+        if f1.shape[1]>64:
+            pca = PCA(n_components=64)
+            stacked = np.vstack([f1, f2])
+            pca.fit(stacked)
+            f1 = pca.transform(f1)
+            f2 = pca.transform(f2)
+        def ctx(a,b):
+            e=1e-8
+            an=a/(np.linalg.norm(a)+e)
+            bn=b/(np.linalg.norm(b)+e)
+            return 0.7*np.linalg.norm(a-b) + 0.3*(1-np.dot(an,bn))
+        align = dtw_distance(f1,f2, distance_function=ctx)
+        length = len(align.index1)
+        if length==0: return 20.0
+        dist = align.distance/length
+        sim = 100/(1+np.exp(0.5*dist-2.5))
+        return float(np.clip(sim,0,100))
 
     def speech_to_text(self, audio):
-        print("Converting speech to text with Slovak-optimized model...")
-        try:
-            audio = audio / (np.max(np.abs(audio)) + 1e-10)
-            max_length = 30 * self.sample_rate
-
-            if len(audio) > max_length:
-                print("Long audio detected, processing in chunks...")
-                chunks = [audio[i:i + max_length] for i in range(0, len(audio), max_length)]
-                transcriptions = []
-
-                for i, chunk in enumerate(chunks):
-                    print(f"Processing chunk {i + 1}/{len(chunks)}...")
-                    input_values = self.stt_processor(chunk, sampling_rate=self.sample_rate,
-                                                      return_tensors="pt").input_values
-                    input_values = input_values.to(device)
-
-                    with torch.no_grad():
-                        logits = self.stt_model(input_values).logits
-
-                    predicted_ids = torch.argmax(logits, dim=-1)
-                    chunk_transcription = self.stt_processor.batch_decode(predicted_ids)[0]
-                    transcriptions.append(chunk_transcription)
-
-                transcription = " ".join(transcriptions)
-            else:
-                input_values = self.stt_processor(audio, sampling_rate=self.sample_rate,
-                                                  return_tensors="pt").input_values
-                input_values = input_values.to(device)
-
+        audio = audio/(np.max(np.abs(audio))+1e-10)
+        max_len = 30*self.sample_rate
+        texts=[]
+        if len(audio)>max_len:
+            for i in range(0,len(audio),max_len):
+                chunk=audio[i:i+max_len]
+                vals=self.stt_processor(chunk, sampling_rate=self.sample_rate,
+                                        return_tensors="pt").input_values.to(device)
                 with torch.no_grad():
-                    logits = self.stt_model(input_values).logits
+                    logits=self.stt_model(vals).logits
+                ids=torch.argmax(logits,-1)
+                texts.append(self.stt_processor.batch_decode(ids)[0])
+            text=" ".join(texts)
+        else:
+            vals=self.stt_processor(audio, sampling_rate=self.sample_rate,
+                                    return_tensors="pt").input_values.to(device)
+            with torch.no_grad():
+                logits=self.stt_model(vals).logits
+            ids=torch.argmax(logits,-1)
+            text=self.stt_processor.batch_decode(ids)[0]
+        # fix diacritics
+        rep={"a´":"á","e´":"é","i´":"í","o´":"ó","u´":"ú",
+             "c´":"č","s´":"š","z´":"ž","l´":"ľ","t´":"ť",
+             "d´":"ď","n´":"ň","r´":"ŕ"}
+        for o,n in rep.items(): text=text.replace(o,n)
+        return text.lower()
 
-                predicted_ids = torch.argmax(logits, dim=-1)
-                transcription = self.stt_processor.batch_decode(predicted_ids)[0]
+    def compute_text_similarity(self, t1, t2):
+        n1=t1.replace("_","").replace(" ","")
+        n2=t2.replace("_","").replace(" ","")
+        if n1==n2: return 100.0
+        L=max(len(n1),len(n2))
+        if L==0: return 100.0
+        d=levenshtein_distance(n1,n2)
+        return max(0.0, min(100.0, (1-d/L)*100))
 
-            transcription = transcription.lower()
-            transcription = self._fix_slovak_diacritics(transcription)
-
-            print(f"Transcription: {transcription}")
-            return transcription
-        except Exception as e:
-            print(f"STT error: {e}")
-            return ""
-
-    def _fix_slovak_diacritics(self, text):
-        replacements = {
-            "a´": "á", "e´": "é", "i´": "í", "o´": "ó", "u´": "ú",
-            "c´": "č", "s´": "š", "z´": "ž", "l´": "ľ", "t´": "ť",
-            "d´": "ď", "n´": "ň", "r´": "ŕ"
-        }
-
-        for old, new in replacements.items():
-            text = text.replace(old, new)
-
-        return text
-
-    def compute_text_similarity(self, text1, text2):
-        print("Computing string similarity (Levenshtein)...")
-        norm_text1 = text1.replace("_", "").replace(" ", "")
-        norm_text2 = text2.replace("_", "").replace(" ", "")
-        if norm_text1 == norm_text2:
-            return 100.0
-        max_len = max(len(norm_text1), len(norm_text2))
-        if max_len == 0:
-            return 100.0
-        dist = levenshtein_distance(norm_text1, norm_text2)
-        similarity = (1 - dist / max_len) * 100
-        return max(0.0, min(100.0, similarity))
-
-    def compute_phonetic_similarity(self, audio1, audio2):
-        print("Computing phonetic similarity...")
-
-        hubert_features1 = self.extract_hubert_features(audio1)
+    def compute_phonetic_similarity(self, a1, a2):
+       hubert_features1 = self.extract_hubert_features(audio1)
         hubert_features2 = self.extract_hubert_features(audio2)
         hubert_sim = self.compute_context_dtw_similarity(hubert_features1, hubert_features2)
 
@@ -480,24 +308,8 @@ class SpeechSimilarityAnalyzer:
             "transcription2": text2
         }, hubert_features1, hubert_features2
 
-    def extract_spectral_features(self, spectrogram):
-        if spectrogram is None or np.isnan(spectrogram).any():
-            return np.zeros(256)
-
-        spec_tensor = torch.FloatTensor(spectrogram).unsqueeze(0).unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            features = self.feature_extractor(spec_tensor)
-            features = features.cpu().numpy().squeeze()
-
-        if np.max(np.abs(features)) > 0:
-            features = features / np.max(np.abs(features))
-
-        return features
-
-    def compute_spectral_similarity(self, audio1, audio2):
-        print("Computing spectral similarity...")
-        try:
+    def compute_spectral_similarity(self, a1, a2):
+       try:
             spec1 = self.create_spectrogram(audio1)
             spec2 = self.create_spectrogram(audio2)
 
@@ -568,8 +380,8 @@ class SpeechSimilarityAnalyzer:
         except Exception as e:
             print(f"Visualization error: {e}")
 
-    def color_code_transcription(self, text1, text2):
-        """Compare two transcriptions and color-code the first based on an aligned match."""
+    def color_code_transcription(self, t1, t2):
+       """Compare two transcriptions and color-code the first based on an aligned match."""
         # Normalize for alignment (optional, depending on if you want to ignore spaces/underscores here too)
         norm_text1 = text1
         norm_text2 = text2
@@ -638,9 +450,10 @@ class SpeechSimilarityAnalyzer:
             "transcription2": text2
         }
 
+  
+
     def compute_similarity(self, audio1, audio2, visualize=True):
-        print("\nComputing similarity...")
-        start_time = time.time()
+       start_time = time.time()
 
         metrics, features1, features2 = self.compute_phonetic_similarity(audio1, audio2)
 
@@ -707,87 +520,3 @@ class SpeechSimilarityAnalyzer:
             self.visualize_comparison(spec1, spec2, features1, features2, linguistic_similarity)
 
         return linguistic_similarity, colored_transcription
-
-    def analyze_files(self, file1, file2, visualize=True):
-        print(f"\nAnalyzing files: {file1} and {file2}")
-        audio1 = self.load_audio(file1)
-        audio2 = self.load_audio(file2)
-
-        if audio1 is None or audio2 is None:
-            return "Error: Could not load one or both audio files"
-
-        similarity, colored_transcription = self.compute_similarity(audio1, audio2, visualize)
-
-        print("\nTranscription Comparison:")
-        print(f"First Audio Transcription (matches in green, mismatches in red): {colored_transcription['ansi']}")
-        print(f"Second Audio Transcription: {colored_transcription['transcription2']}")
-        with open("transcription_comparison.html", "w", encoding="utf-8") as f:
-            f.write(f"<p>First Audio Transcription: {colored_transcription['html']}</p>")
-            f.write(f"<p>Second Audio Transcription: {colored_transcription['transcription2']}</p>")
-        print("HTML transcription comparison saved as 'transcription_comparison.html'")
-
-        return similarity, colored_transcription
-
-class FeatureExtractor(nn.Module):
-    def __init__(self):
-        super(FeatureExtractor, self).__init__()
-
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten()
-        )
-
-    def forward(self, x):
-        return self.encoder(x)
-
-def main():
-    print("Slovak Speech Similarity Analyzer")
-    print("=" * 50)
-
-    try:
-        analyzer = SpeechSimilarityAnalyzer()
-
-        while True:
-            file1 = input("\nEnter path to first audio file: ")
-            if os.path.exists(file1):
-                break
-            print("File not found. Please try again.")
-
-        while True:
-            file2 = input("Enter path to second audio file: ")
-            if os.path.exists(file2):
-                break
-            print("File not found. Please try again.")
-
-        visualize = input("Visualize comparison? (yes/no, default: yes): ").lower() != "no"
-        print("\nStarting analysis...")
-        overall_start_time = time.time()
-
-        result = analyzer.analyze_files(file1, file2, visualize)
-
-        if isinstance(result, str):
-            print(result)
-        else:
-            similarity, colored_transcription = result
-            print("\n" + "=" * 50)
-            print(f"Overall similarity (Same Word & Pronunciation): {similarity:.2f}%")
-            print(f"Total processing time: {time.time() - overall_start_time:.2f} seconds")
-            print("=" * 50)
-
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-        print("\nPlease ensure required libraries are installed")
-
-if __name__ == "__main__":
-    main()
