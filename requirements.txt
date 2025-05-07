@@ -1,18 +1,19 @@
-# Use the PyTorch CPU index so pip never pulls CUDA wheels
+# Force the last 1.x release so binary wheels match PyTorch, SciPy, scikit-learn…
+numpy==1.26.4
+
+# Extra index so we always pull CPU-only wheels
 --extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+torchaudio==2.2.2+cpu   # if you need it
 
-torch==2.2.2+cpu         # ~150 MB wheel instead of 865 MB
-torchaudio==2.2.2+cpu    # (smaller too, optional if you use torchaudio)
-
-# the rest of your deps
 Flask
 Flask-SQLAlchemy
 transformers
 librosa
-numpy
 scipy
 scikit-learn
 python-Levenshtein
 gunicorn
 matplotlib
+
 
