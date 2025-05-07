@@ -1,7 +1,13 @@
+# Use the PyTorch CPU index so pip never pulls CUDA wheels
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.2.2+cpu         # ~150 MB wheel instead of 865 MB
+torchaudio==2.2.2+cpu    # (smaller too, optional if you use torchaudio)
+
+# the rest of your deps
 Flask
 Flask-SQLAlchemy
 transformers
-torch
 librosa
 numpy
 scipy
