@@ -2,9 +2,9 @@ services:
   - type: web
     name: slovak-speech-sim
     env: python
-    region: frankfurt       # choose a region close to you
-    plan: free              # or “starter” / “standard” as you like
+    region: frankfurt
+    plan: free
     branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     autoDeploy: true
