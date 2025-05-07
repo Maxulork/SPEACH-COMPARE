@@ -6,5 +6,5 @@ services:
     plan: free
     branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: python app:app --bind 0.0.0.0:$PORT
+    startCommand: python app.py
     autoDeploy: true
